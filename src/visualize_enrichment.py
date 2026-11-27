@@ -1,4 +1,16 @@
-import textwrap
+
+"""
+기능적 풍부도 분석 결과 시각화
+
+- 전체, 상향, 하향 조절 DEG의 GO 및 KEGG Dot Plot
+- 라이브러리별 네 가지 분석 조건 통합 비교
+- 공통 Y축 및 독립 Y축 요약 그래프
+- 유의한 항목이 없는 분석 결과 처리
+- PNG 및 PDF 형식 저장
+"""
+
+from pathlib import Path
+from textwrap import fill
 
 import numpy as np
 import pandas as pd
@@ -8,35 +20,38 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
-from matplotlib.cm import ScalarMappable
 from matplotlib.lines import Line2D
+from matplotlib.cm import ScalarMappable
 
 from src.enrichment_analysis import (
-    PROJECT_ROOT,
     ENRICHMENT_DIR,
     ENRICHMENT_FDR,
-    DATA_FILES,
-    GENE_GROUPS,
     GENE_SET_LIBRARIES,
+    GENE_GROUPS,
 )
 
 
 # ============================================================
-# 1. 시각화 설정
+# 1. 기본 설정
 # ============================================================
 
-ENRICHMENT_PLOT_DIR = (
-    PROJECT_ROOT / "results" / "enrichment_plots"
-)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+PLOT_DIR = PROJECT_ROOT / "results" / "enrichment_plots"
 
 TOP_N = 10
 DPI = 300
-DOT_SIZE_SCALE = 18
-CMAP = "viridis"
 
 DATASET_LABELS = {
     "t2d": "Type 2 Diabetes",
     "combined_stress": "Glucose + Palmitate",
+    "palmitate": "Palmitate",
+    "glucose": "Glucose",
+}
+
+DATASET_SHORT_LABELS = {
+    "t2d": "T2D",
+    "combined_stress": "Combined",
     "palmitate": "Palmitate",
     "glucose": "Glucose",
 }
@@ -60,27 +75,39 @@ GROUP_COLORS = {
     "downregulated": "#5286C5",
 }
 
+CMAP = "viridis"
+SIZE_FACTOR = 15
+
+plt.rcParams.update({
+    "font.family": "DejaVu Sans",
+    "font.size": 11,
+    "axes.titlesize": 13,
+    "axes.labelsize": 11,
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+    "legend.fontsize": 10,
+    "pdf.fonttype": 42,
+})
+
 
 # ============================================================
-# 2. 그래프 저장 함수
+# 2. 그래프 저장
 # ============================================================
 
 def save_figure(fig, filename):
-    ENRICHMENT_PLOT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    """그래프를 PNG 및 PDF 형식으로 저장한다."""
 
-    for extension in ["png", "pdf"]:
-        output_path = (
-            ENRICHMENT_PLOT_DIR
-            / f"{filename}.{extension}"
-        )
+    PLOT_DIR.mkdir(parents=True, exist_ok=True)
+
+    for extension in ("png", "pdf"):
+
+        output_path = PLOT_DIR / f"{filename}.{extension}"
 
         fig.savefig(
             output_path,
             dpi=DPI,
             bbox_inches="tight",
+            pad_inches=0.15,
             facecolor="white",
         )
 
@@ -93,11 +120,9 @@ def save_figure(fig, filename):
 # 3. 분석 결과 불러오기
 # ============================================================
 
-def load_enrichment_results(
-    dataset,
-    group,
-    library,
-):
+def load_enrichment_results(dataset, group, library):
+    """기존 풍부도 분석 CSV를 불러온다."""
+
     file_path = (
         ENRICHMENT_DIR
         / dataset
@@ -115,143 +140,127 @@ def load_enrichment_results(
         "term",
         "overlap_count",
         "gene_ratio",
-        "fold_enrichment",
-        "pvalue",
         "adjusted_pvalue",
     }
 
-    missing_columns = (
-        required_columns - set(df.columns)
-    )
+    missing_columns = required_columns - set(df.columns)
 
     if missing_columns:
         raise ValueError(
-            f"필수 열이 누락되었습니다: "
-            f"{missing_columns}"
+            f"필수 열이 없습니다: {missing_columns}"
         )
 
-    return df
-
-
-# ============================================================
-# 4. Dot Plot 데이터 전처리
-# ============================================================
-
-def prepare_dotplot_data(df, top_n=TOP_N):
-    if top_n <= 0:
-        raise ValueError(
-            "top_n은 양의 정수여야 합니다."
-        )
-
-    plot_df = df.copy()
+    if df.empty:
+        return df
 
     numeric_columns = [
         "overlap_count",
         "gene_ratio",
-        "fold_enrichment",
-        "pvalue",
         "adjusted_pvalue",
     ]
 
-    # 숫자형 데이터 변환
     for column in numeric_columns:
-        plot_df[column] = pd.to_numeric(
-            plot_df[column],
-            errors="coerce",
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="raise",
         )
 
-    # 비정상 데이터 검사
-    valid = (
-        np.isfinite(
-            plot_df[numeric_columns]
-        ).all(axis=1)
-        & plot_df["adjusted_pvalue"].between(0, 1)
-        & plot_df["pvalue"].between(0, 1)
-        & plot_df["gene_ratio"].between(0, 1)
-        & (plot_df["overlap_count"] > 0)
-        & (plot_df["fold_enrichment"] > 0)
-        & (
-            plot_df["overlap_count"]
-            % 1 == 0
-        )
-        & plot_df["term"].notna()
-    )
+    values = df[numeric_columns].to_numpy(dtype=float)
 
-    if not valid.all():
-        invalid_count = int((~valid).sum())
-
+    if not np.isfinite(values).all():
         raise ValueError(
-            f"시각화 데이터에 비정상적인 "
-            f"행이 {invalid_count}개 있습니다."
+            f"유효하지 않은 통계량이 있습니다: {file_path}"
         )
 
-    # 유의한 결과만 선택
-    plot_df = plot_df.loc[
-        plot_df["adjusted_pvalue"]
-        < ENRICHMENT_FDR
+    if not df["adjusted_pvalue"].between(0, 1).all():
+        raise ValueError("보정 p-value 범위 오류")
+
+    if not df["gene_ratio"].between(0, 1).all():
+        raise ValueError("Gene ratio 범위 오류")
+
+    counts = df["overlap_count"]
+
+    if ((counts <= 0) | (counts % 1 != 0)).any():
+        raise ValueError("중첩 유전자 수 오류")
+
+    df = df.loc[
+        df["adjusted_pvalue"] < ENRICHMENT_FDR
     ].copy()
 
-    # 보정 p-value 기준 상위 항목 선택
-    plot_df = plot_df.sort_values(
-        by=[
-            "adjusted_pvalue",
-            "pvalue",
-            "term",
-        ],
-        ascending=True,
-    ).head(top_n).copy()
+    sort_columns = ["adjusted_pvalue"]
 
-    # p-value가 0인 경우 로그 변환 오류 방지
-    # 원래 보정 p-value는 변경하지 않음
-    minimum_positive = np.finfo(float).tiny
+    if "pvalue" in df.columns:
+        sort_columns.append("pvalue")
 
-    plot_df["neg_log10_padj"] = (
-        -np.log10(
-            plot_df["adjusted_pvalue"].clip(
-                lower=minimum_positive
-            )
-        )
-    )
+    sort_columns.append("term")
 
-    # 긴 경로 이름 자동 줄바꿈
-    plot_df["display_term"] = (
-        plot_df["term"]
-        .astype(str)
-        .apply(
-            lambda term: textwrap.fill(
-                term,
-                width=42,
-                break_long_words=False,
-                break_on_hyphens=False,
-            )
-        )
-    )
-
-    return plot_df.reset_index(drop=True)
+    return df.sort_values(
+        sort_columns,
+        kind="stable",
+    ).reset_index(drop=True)
 
 
 # ============================================================
-# 5. 색상 범위 설정
+# 4. Dot Plot 데이터 준비
 # ============================================================
 
-def create_color_norm(dataframes):
-    values = []
+def prepare_dotplot_data(df, top_n=TOP_N):
+    """상위 유의 항목과 시각화용 통계량을 준비한다."""
 
-    for df in dataframes:
-        if not df.empty:
-            values.extend(
-                df["neg_log10_padj"].tolist()
-            )
+    plot_df = df.head(top_n).copy()
+
+    if plot_df.empty:
+        plot_df["neg_log10_padj"] = pd.Series(dtype=float)
+        return plot_df
+
+    positive_values = df.loc[
+        df["adjusted_pvalue"] > 0,
+        "adjusted_pvalue",
+    ]
+
+    if positive_values.empty:
+        minimum_pvalue = np.finfo(float).tiny
+    else:
+        minimum_pvalue = max(
+            positive_values.min() / 10,
+            np.nextafter(0.0, 1.0),
+        )
+
+    plot_pvalues = plot_df["adjusted_pvalue"].mask(
+        plot_df["adjusted_pvalue"] == 0,
+        minimum_pvalue,
+    )
+
+    plot_df["neg_log10_padj"] = -np.log10(
+        plot_pvalues
+    )
+
+    return plot_df
+
+
+# ============================================================
+# 5. 색상 척도
+# ============================================================
+
+def create_color_norm(plot_frames):
+    """여러 그래프에 적용할 공통 색상 범위를 계산한다."""
 
     minimum = -np.log10(ENRICHMENT_FDR)
 
-    if not values:
-        maximum = minimum + 1
-    else:
-        maximum = max(values)
+    valid_frames = [
+        df for df in plot_frames
+        if not df.empty
+    ]
 
-        if maximum <= minimum:
-            maximum = minimum + 1
+    if valid_frames:
+        maximum = max(
+            df["neg_log10_padj"].max()
+            for df in valid_frames
+        )
+    else:
+        maximum = minimum + 1
+
+    maximum = max(maximum, minimum + 0.01)
 
     return Normalize(
         vmin=minimum,
@@ -260,68 +269,76 @@ def create_color_norm(dataframes):
 
 
 # ============================================================
-# 6. 점 크기 범례 생성
+# 6. 점 크기 범례
 # ============================================================
 
-def create_size_legend(dataframes):
-    counts = []
+def create_size_legend(plot_frames):
+    """중첩 유전자 수에 대응하는 점 크기 범례를 만든다."""
 
-    for df in dataframes:
-        if not df.empty:
-            counts.extend(
-                df["overlap_count"].tolist()
-            )
+    valid_frames = [
+        df for df in plot_frames
+        if not df.empty
+    ]
 
-    if not counts:
+    if not valid_frames:
         return []
 
-    legend_counts = sorted(set([
-        int(min(counts)),
-        int(np.median(counts)),
-        int(max(counts)),
-    ]))
+    counts = pd.concat(
+        [
+            df["overlap_count"]
+            for df in valid_frames
+        ],
+        ignore_index=True,
+    )
+
+    legend_counts = sorted({
+        int(counts.min()),
+        int(counts.median()),
+        int(counts.max()),
+    })
 
     handles = []
 
     for count in legend_counts:
-        handle = Line2D(
-            [],
-            [],
-            linestyle="none",
-            marker="o",
-            markersize=np.sqrt(
-                count * DOT_SIZE_SCALE
-            ),
-            markerfacecolor="#999999",
-            markeredgecolor="#333333",
-            markeredgewidth=0.5,
-            label=str(count),
-        )
 
-        handles.append(handle)
+        handles.append(
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="none",
+                markerfacecolor="#A0A0A0",
+                markeredgecolor="#555555",
+                markeredgewidth=0.6,
+                markersize=np.sqrt(
+                    count * SIZE_FACTOR
+                ),
+                label=str(count),
+            )
+        )
 
     return handles
 
 
 # ============================================================
-# 7. Dot Plot 공통 그리기 함수
+# 7. Dot Plot 그리기
 # ============================================================
 
 def draw_dotplot(
     ax,
     plot_df,
-    title,
-    norm,
+    color_norm,
+    x_limit=None,
+    wrap_width=43,
+    label_size=10,
 ):
-    ax.set_title(
-        title,
-        fontsize=12,
-        fontweight="bold",
-        pad=12,
-    )
+    """개별 패널에 Dot Plot을 그린다."""
 
     # 유의한 항목이 없는 경우
     if plot_df.empty:
+
+        ax.set_axis_off()
+
         ax.text(
             0.5,
             0.5,
@@ -329,54 +346,58 @@ def draw_dotplot(
             transform=ax.transAxes,
             ha="center",
             va="center",
-            fontsize=12,
+            fontsize=13,
             color="#666666",
         )
-
-        ax.set_xticks([])
-        ax.set_yticks([])
 
         return None
 
     y_positions = np.arange(len(plot_df))
 
+    labels = [
+        fill(str(term), width=wrap_width)
+        for term in plot_df["term"]
+    ]
+
     scatter = ax.scatter(
         plot_df["gene_ratio"],
         y_positions,
-        s=(
-            plot_df["overlap_count"]
-            * DOT_SIZE_SCALE
-        ),
+        s=plot_df["overlap_count"] * SIZE_FACTOR,
         c=plot_df["neg_log10_padj"],
         cmap=CMAP,
-        norm=norm,
-        edgecolors="#333333",
+        norm=color_norm,
+        edgecolors="#555555",
         linewidths=0.5,
-        alpha=0.9,
+        alpha=0.95,
+        clip_on=False,
         zorder=3,
     )
 
     ax.set_yticks(y_positions)
 
     ax.set_yticklabels(
-        plot_df["display_term"],
-        fontsize=9,
+        labels,
+        fontsize=label_size,
     )
 
-    # 가장 유의한 항목을 위쪽에 표시
-    ax.invert_yaxis()
-
+    # 최상단과 최하단 점의 잘림 방지
     ax.set_ylim(
-        len(plot_df) - 0.5,
-        -0.5,
+        len(plot_df) - 0.3,
+        -0.7,
     )
+
+    if x_limit is None:
+        x_limit = max(
+            plot_df["gene_ratio"].max() * 1.15,
+            0.01,
+        )
+
+    ax.set_xlim(0, x_limit)
 
     ax.set_xlabel(
         "Gene Ratio",
-        fontsize=11,
+        labelpad=8,
     )
-
-    ax.set_xlim(left=0)
 
     ax.grid(
         axis="x",
@@ -393,249 +414,342 @@ def draw_dotplot(
 
 
 # ============================================================
-# 8. 개별 분석 결과 Dot Plot
+# 8. 개별 풍부도 분석 그래프
 # ============================================================
 
 def plot_individual_enrichment(
     dataset,
     group,
     library,
-    df,
+    tested_terms=None,
 ):
+    """각 분석 조합에 대한 개별 그래프를 생성한다."""
+
+    df = load_enrichment_results(
+        dataset,
+        group,
+        library,
+    )
+
     plot_df = prepare_dotplot_data(df)
 
-    norm = create_color_norm([plot_df])
-
-    # 경로 이름의 줄바꿈 수를 반영한 그래프 높이
-    line_count = sum(
-        term.count("\n") + 1
-        for term in plot_df["display_term"]
-    )
-
-    figure_height = max(
-        4.5,
-        line_count * 0.38 + 2.5,
-    )
-
-    fig, ax = plt.subplots(
-        figsize=(12, figure_height),
-    )
-
-    fig.suptitle(
-        DATASET_LABELS[dataset],
-        fontsize=15,
-        fontweight="bold",
-    )
-
-    title = (
-        f"{LIBRARY_LABELS[library]} "
-        f"| {GROUP_LABELS[group]}"
-    )
-
-    scatter = draw_dotplot(
-        ax,
-        plot_df,
-        title,
-        norm,
-    )
-
-    if scatter is not None:
-        colorbar = fig.colorbar(
-            scatter,
-            ax=ax,
-            pad=0.04,
-            shrink=0.8,
-        )
-
-        colorbar.set_label(
-            "-log10(Adjusted P-value)"
-        )
-
-        size_handles = create_size_legend(
-            [plot_df]
-        )
-
-        ax.legend(
-            handles=size_handles,
-            title="Overlap Count",
-            loc="upper center",
-            bbox_to_anchor=(0.5, -0.14),
-            ncol=len(size_handles),
-            frameon=False,
-        )
-
-    fig.text(
-        0.5,
-        0.015,
-        (
-            f"Top {len(plot_df)} of {len(df)} "
-            f"significant terms "
-            f"(adjusted p-value < "
-            f"{ENRICHMENT_FDR}).\n"
-            "Gene ratio = overlap count / "
-            "mapped query genes."
-        ),
-        ha="center",
-        fontsize=9,
-        color="#555555",
-    )
-
-    fig.tight_layout(
-        rect=[0, 0.12, 1, 0.93]
-    )
+    total_terms = len(df)
+    displayed_terms = len(plot_df)
 
     filename = (
         f"{dataset}_{group}_{library}_dotplot"
     )
 
-    save_figure(fig, filename)
+    title = DATASET_LABELS[dataset]
 
+    subtitle = (
+        f"{LIBRARY_LABELS[library]}"
+        f" | {GROUP_LABELS[group]}"
+    )
 
-# ============================================================
-# 9. 네 가지 데이터셋 통합 비교
-# ============================================================
+    # 유의한 결과가 없는 경우
+    if plot_df.empty:
 
-def plot_library_comparison(
-    library,
-    dataframes,
-):
-    prepared = {
-        dataset: prepare_dotplot_data(
-            dataframes[dataset]
+        fig, ax = plt.subplots(
+            figsize=(8, 3.1),
         )
-        for dataset in DATA_FILES
-    }
 
-    plot_dataframes = list(
-        prepared.values()
-    )
+        fig.subplots_adjust(
+            left=0.08,
+            right=0.92,
+            top=0.68,
+            bottom=0.25,
+        )
 
-    # 모든 패널에서 동일한 색상 범위 사용
-    norm = create_color_norm(
-        plot_dataframes
-    )
+        fig.suptitle(
+            title,
+            fontsize=17,
+            fontweight="bold",
+            y=0.96,
+        )
 
-    # 모든 패널에서 동일한 X축 범위 사용
-    ratio_values = []
-
-    for df in plot_dataframes:
-        if not df.empty:
-            ratio_values.extend(
-                df["gene_ratio"].tolist()
-            )
-
-    maximum_ratio = (
-        max(ratio_values) * 1.15
-        if ratio_values
-        else 1.0
-    )
-
-    maximum_ratio = min(
-        maximum_ratio,
-        1.1,
-    )
-
-    fig, axes = plt.subplots(
-        2,
-        2,
-        figsize=(20, 15),
-    )
-
-    fig.suptitle(
-        (
-            f"{LIBRARY_LABELS[library]} "
-            "Enrichment Comparison"
-        ),
-        fontsize=18,
-        fontweight="bold",
-        y=0.98,
-    )
-
-    panel_labels = ["A", "B", "C", "D"]
-
-    for ax, dataset, panel in zip(
-        axes.flat,
-        DATA_FILES,
-        panel_labels,
-    ):
-        plot_df = prepared[dataset]
-
-        title = (
-            f"{panel}. "
-            f"{DATASET_LABELS[dataset]}"
+        ax.set_title(
+            subtitle,
+            fontsize=12,
+            fontweight="bold",
+            pad=10,
         )
 
         draw_dotplot(
             ax,
             plot_df,
-            title,
-            norm,
+            create_color_norm([]),
         )
 
-        ax.set_xlim(
-            0,
-            maximum_ratio,
+        if tested_terms is None:
+            detail = "No terms met the significance threshold."
+        else:
+            detail = (
+                f"Tested terms: {tested_terms:,}"
+                " | Significant terms: 0"
+            )
+
+        fig.text(
+            0.5,
+            0.09,
+            f"{detail}\n"
+            f"Adjusted p-value < {ENRICHMENT_FDR}",
+            ha="center",
+            va="center",
+            fontsize=10,
+            color="#555555",
         )
 
-    fig.subplots_adjust(
-        left=0.25,
-        right=0.87,
-        top=0.91,
-        bottom=0.15,
-        wspace=1.25,
-        hspace=0.5,
+        save_figure(fig, filename)
+
+        return True
+
+    # 표시 항목 수에 따른 그래프 높이 조절
+    figure_height = max(
+        4.7,
+        3.1 + displayed_terms * 0.52,
     )
 
-    # 유의한 항목이 있는 경우에만 공통 범례 생성
-    if ratio_values:
-        colorbar_axis = fig.add_axes([
-            0.91,
-            0.25,
-            0.015,
-            0.5,
-        ])
+    figure_width = (
+        11.5 if displayed_terms > 5 else 10.5
+    )
 
-        scalar_mappable = ScalarMappable(
-            norm=norm,
+    fig, ax = plt.subplots(
+        figsize=(figure_width, figure_height),
+    )
+
+    bottom = 1.65 / figure_height
+    top = 1 - 0.95 / figure_height
+
+    fig.subplots_adjust(
+        left=0.35,
+        right=0.87,
+        top=top,
+        bottom=bottom,
+    )
+
+    fig.suptitle(
+        title,
+        fontsize=18,
+        fontweight="bold",
+        y=1 - 0.12 / figure_height,
+    )
+
+    ax.set_title(
+        subtitle,
+        fontsize=13,
+        fontweight="bold",
+        pad=12,
+    )
+
+    color_norm = create_color_norm([plot_df])
+
+    scatter = draw_dotplot(
+        ax,
+        plot_df,
+        color_norm,
+        wrap_width=43,
+        label_size=10,
+    )
+
+    colorbar = fig.colorbar(
+        scatter,
+        ax=ax,
+        fraction=0.045,
+        pad=0.04,
+    )
+
+    colorbar.set_label(
+        "-log10(Adjusted P-value)",
+        fontsize=10,
+    )
+
+    handles = create_size_legend([plot_df])
+
+    fig.legend(
+        handles=handles,
+        title="Overlap Count",
+        loc="lower center",
+        bbox_to_anchor=(
+            0.60,
+            0.58 / figure_height,
+        ),
+        ncol=len(handles),
+        frameon=False,
+        columnspacing=1.8,
+        handletextpad=0.7,
+    )
+
+    fig.text(
+        0.5,
+        0.13 / figure_height,
+        (
+            f"Showing {displayed_terms} of "
+            f"{total_terms} significant terms "
+            f"(adjusted p-value < {ENRICHMENT_FDR}).\n"
+            "Gene ratio = overlap count / "
+            "mapped query genes."
+        ),
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        color="#555555",
+    )
+
+    save_figure(fig, filename)
+
+    return False
+
+
+# ============================================================
+# 9. 라이브러리별 통합 비교 그래프
+# ============================================================
+
+def plot_library_comparison(library):
+    """전체 DEG 결과를 네 가지 조건에서 비교한다."""
+
+    full_results = {}
+    plot_results = {}
+
+    for dataset in DATASET_LABELS:
+
+        df = load_enrichment_results(
+            dataset,
+            "all",
+            library,
+        )
+
+        full_results[dataset] = df
+
+        plot_results[dataset] = (
+            prepare_dotplot_data(df)
+        )
+
+    frames = list(plot_results.values())
+
+    valid_frames = [
+        df for df in frames
+        if not df.empty
+    ]
+
+    color_norm = create_color_norm(frames)
+
+    if valid_frames:
+
+        x_limit = max(
+            df["gene_ratio"].max()
+            for df in valid_frames
+        ) * 1.15
+
+    else:
+        x_limit = 0.1
+
+    # 긴 항목 이름을 위한 공간 확보
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(19, 12.5),
+    )
+
+    fig.subplots_adjust(
+        left=0.22,
+        right=0.91,
+        top=0.87,
+        bottom=0.16,
+        wspace=0.90,
+        hspace=0.40,
+    )
+
+    fig.suptitle(
+        f"{LIBRARY_LABELS[library]} Enrichment Comparison",
+        fontsize=21,
+        fontweight="bold",
+        y=0.98,
+    )
+
+    for ax, dataset, panel in zip(
+        axes.flat,
+        DATASET_LABELS,
+        ("A", "B", "C", "D"),
+    ):
+
+        plot_df = plot_results[dataset]
+
+        total_terms = len(
+            full_results[dataset]
+        )
+
+        displayed_terms = len(plot_df)
+
+        draw_dotplot(
+            ax,
+            plot_df,
+            color_norm,
+            x_limit=x_limit,
+            wrap_width=36,
+            label_size=10,
+        )
+
+        ax.set_title(
+            (
+                f"{panel}. {DATASET_LABELS[dataset]}\n"
+                f"{displayed_terms} of "
+                f"{total_terms} significant terms"
+            ),
+            fontsize=12,
+            fontweight="bold",
+            pad=12,
+        )
+
+    # 모든 패널에 동일한 색상 척도 적용
+    if valid_frames:
+
+        colorbar_ax = fig.add_axes(
+            [0.935, 0.25, 0.014, 0.53]
+        )
+
+        mappable = ScalarMappable(
+            norm=color_norm,
             cmap=CMAP,
         )
 
-        scalar_mappable.set_array([])
+        mappable.set_array([])
 
         colorbar = fig.colorbar(
-            scalar_mappable,
-            cax=colorbar_axis,
+            mappable,
+            cax=colorbar_ax,
         )
 
         colorbar.set_label(
-            "-log10(Adjusted P-value)"
+            "-log10(Adjusted P-value)",
+            fontsize=11,
         )
 
-        size_handles = create_size_legend(
-            plot_dataframes
-        )
+        handles = create_size_legend(frames)
 
         fig.legend(
-            handles=size_handles,
+            handles=handles,
             title="Overlap Count",
             loc="lower center",
-            bbox_to_anchor=(0.5, 0.065),
-            ncol=len(size_handles),
+            bbox_to_anchor=(0.53, 0.065),
+            ncol=len(handles),
             frameon=False,
+            columnspacing=2.0,
         )
 
     fig.text(
         0.5,
-        0.02,
+        0.018,
         (
-            f"All DEGs | Top {TOP_N} significant "
-            "terms per dataset.\n"
+            "All DEGs | Up to 10 significant terms "
+            "per dataset.\n"
             "Shared gene-ratio axis, color scale "
             "and marker-size scale.\n"
             "Gene ratios use dataset-specific "
             "mapped query sizes."
         ),
         ha="center",
+        va="bottom",
         fontsize=10,
         color="#555555",
     )
@@ -647,10 +761,12 @@ def plot_library_comparison(
 
 
 # ============================================================
-# 10. 유의 항목 수 비교 그래프
+# 10. 요약 데이터 검증
 # ============================================================
 
-def plot_enrichment_summary():
+def load_summary():
+    """48개 분석 조합의 요약 결과를 검증한다."""
+
     summary_path = (
         ENRICHMENT_DIR
         / "enrichment_summary.csv"
@@ -658,91 +774,218 @@ def plot_enrichment_summary():
 
     summary = pd.read_csv(summary_path)
 
+    keys = [
+        "dataset",
+        "gene_group",
+        "library",
+    ]
+
+    required_columns = set(keys) | {
+        "tested_terms",
+        "significant_terms",
+    }
+
+    if not required_columns.issubset(
+        summary.columns
+    ):
+        raise ValueError("요약 파일의 필수 열 누락")
+
+    if summary.duplicated(keys).any():
+        raise ValueError("중복 분석 조합 발견")
+
+    expected = {
+        (dataset, group, library)
+        for dataset in DATASET_LABELS
+        for group in GENE_GROUPS
+        for library in GENE_SET_LIBRARIES
+    }
+
+    actual = set(
+        summary[keys].itertuples(
+            index=False,
+            name=None,
+        )
+    )
+
+    if actual != expected:
+        raise ValueError("분석 조합 누락 또는 불일치")
+
+    for column in (
+        "tested_terms",
+        "significant_terms",
+    ):
+
+        summary[column] = pd.to_numeric(
+            summary[column],
+            errors="raise",
+        )
+
+        values = summary[column]
+
+        if (
+            not np.isfinite(values).all()
+            or (values < 0).any()
+            or (values % 1 != 0).any()
+        ):
+            raise ValueError(
+                f"유효하지 않은 항목 수: {column}"
+            )
+
+    if (
+        summary["significant_terms"]
+        > summary["tested_terms"]
+    ).any():
+        raise ValueError("유의 항목 수가 검정 수를 초과함")
+
+    return summary
+
+
+# ============================================================
+# 11. 풍부도 분석 요약 그래프
+# ============================================================
+
+def plot_enrichment_summary(
+    independent_y=False,
+    summary=None,
+):
+    """공통 또는 독립 Y축 요약 그래프를 생성한다."""
+
+    if summary is None:
+        summary = load_summary()
+
+    datasets = list(DATASET_LABELS)
+    groups = list(GROUP_LABELS)
+
+    x_positions = np.arange(len(datasets))
+    bar_width = 0.24
+
     fig, axes = plt.subplots(
         2,
         2,
-        figsize=(15, 10),
-        sharey=True,
+        figsize=(14, 9),
+        sharey=not independent_y,
     )
 
-    x = np.arange(len(DATA_FILES))
+    fig.subplots_adjust(
+        left=0.08,
+        right=0.97,
+        top=0.82,
+        bottom=0.14,
+        wspace=0.23,
+        hspace=0.35,
+    )
 
-    bar_width = 0.25
+    if independent_y:
+        title = (
+            "Functional Enrichment Summary"
+            " | Independent Y-axes"
+        )
+    else:
+        title = "Functional Enrichment Summary"
 
-    maximum_count = int(
+    fig.suptitle(
+        title,
+        fontsize=20,
+        fontweight="bold",
+        y=0.98,
+    )
+
+    global_max = int(
         summary["significant_terms"].max()
+    )
+
+    global_y_limit = max(
+        global_max * 1.20,
+        5,
     )
 
     for ax, library in zip(
         axes.flat,
-        GENE_SET_LIBRARIES,
+        LIBRARY_LABELS,
     ):
+
         library_df = summary.loc[
             summary["library"] == library
         ]
 
-        for i, group in enumerate(
-            GENE_GROUPS
-        ):
+        local_max = int(
+            library_df["significant_terms"].max()
+        )
+
+        if independent_y:
+            y_limit = max(
+                local_max * 1.25,
+                5,
+            )
+        else:
+            y_limit = global_y_limit
+
+        for group_index, group in enumerate(groups):
+
             group_df = library_df.loc[
-                library_df["gene_group"]
-                == group
+                library_df["gene_group"] == group
             ]
 
             counts = (
                 group_df
                 .set_index("dataset")
-                .reindex(list(DATA_FILES))
-                ["significant_terms"]
+                .loc[datasets, "significant_terms"]
+                .to_numpy(dtype=int)
             )
 
-            # 분석 조합 누락을 0으로 처리하지 않음
-            if counts.isna().any():
-                raise ValueError(
-                    f"분석 조합이 누락되었습니다: "
-                    f"{library}, {group}"
-                )
+            offsets = (
+                x_positions
+                + (group_index - 1) * bar_width
+            )
 
             bars = ax.bar(
-                x + (i - 1) * bar_width,
+                offsets,
                 counts,
                 width=bar_width,
                 color=GROUP_COLORS[group],
                 label=GROUP_LABELS[group],
+                zorder=3,
             )
 
-            ax.bar_label(
-                bars,
-                padding=3,
-                fontsize=8,
-                fmt="%d",
-            )
+            # 0개인 경우에도 숫자를 표시
+            for bar, count in zip(bars, counts):
+
+                ax.text(
+                    bar.get_x()
+                    + bar.get_width() / 2,
+                    count + y_limit * 0.018,
+                    str(count),
+                    ha="center",
+                    va="bottom",
+                    fontsize=10,
+                )
 
         ax.set_title(
             LIBRARY_LABELS[library],
-            fontsize=12,
             fontweight="bold",
+            fontsize=13,
+            pad=10,
         )
 
-        ax.set_xticks(x)
+        ax.set_xticks(x_positions)
 
         ax.set_xticklabels(
             [
-                "T2D",
-                "Combined",
-                "Palmitate",
-                "Glucose",
+                DATASET_SHORT_LABELS[d]
+                for d in datasets
             ],
             rotation=15,
+            ha="right",
         )
 
-        ax.set_ylabel(
-            "Significant Terms"
-        )
+        ax.set_ylabel("Significant Terms")
 
-        ax.set_ylim(
-            0,
-            max(1, maximum_count * 1.18),
+        ax.set_ylim(0, y_limit)
+
+        ax.yaxis.set_major_locator(
+            matplotlib.ticker.MaxNLocator(
+                integer=True,
+            )
         )
 
         ax.grid(
@@ -764,64 +1007,72 @@ def plot_enrichment_summary():
         handles,
         labels,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.93),
+        bbox_to_anchor=(0.5, 0.925),
         ncol=3,
         frameon=False,
     )
 
-    fig.suptitle(
-        "Functional Enrichment Summary",
-        fontsize=17,
-        fontweight="bold",
-        y=0.98,
-    )
+    if independent_y:
+
+        axis_note = (
+            "Y-axis ranges differ between libraries."
+        )
+
+        filename = (
+            "enrichment_summary_comparison_independent_y"
+        )
+
+    else:
+
+        axis_note = (
+            "All panels share the same Y-axis range."
+        )
+
+        filename = "enrichment_summary_comparison"
 
     fig.text(
         0.5,
-        0.02,
+        0.025,
         (
             f"Significance threshold: "
-            f"adjusted p-value < "
-            f"{ENRICHMENT_FDR}.\n"
+            f"adjusted p-value < {ENRICHMENT_FDR}.\n"
+            f"{axis_note}\n"
             "Term counts do not directly measure "
             "biological effect size or pathway activity."
         ),
         ha="center",
+        va="bottom",
         fontsize=10,
         color="#555555",
     )
 
-    fig.tight_layout(
-        rect=[0, 0.07, 1, 0.88]
-    )
-
-    save_figure(
-        fig,
-        "enrichment_summary_comparison",
-    )
+    save_figure(fig, filename)
 
 
 # ============================================================
-# 11. 전체 시각화 실행
+# 12. 전체 시각화 실행
 # ============================================================
 
 def main():
-    ENRICHMENT_PLOT_DIR.mkdir(
+
+    PLOT_DIR.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    all_deg_results = {
-        library: {}
-        for library in GENE_SET_LIBRARIES
-    }
+    summary = load_summary()
 
-    individual_count = 0
-    empty_count = 0
+    # 요약 파일과 개별 분석 결과의 개수 일치 확인
+    summary_lookup = summary.set_index([
+        "dataset",
+        "gene_group",
+        "library",
+    ])
 
-    # 48개 분석 조합 개별 시각화
-    for dataset in DATA_FILES:
+    for dataset in DATASET_LABELS:
+
         for group in GENE_GROUPS:
+
             for library in GENE_SET_LIBRARIES:
 
                 df = load_enrichment_results(
@@ -830,87 +1081,91 @@ def main():
                     library,
                 )
 
-                print(
-                    f"[PLOT] {dataset} | "
-                    f"{group} | {library} | "
-                    f"{len(df)} significant terms"
+                expected_count = int(
+                    summary_lookup.loc[
+                        (dataset, group, library),
+                        "significant_terms",
+                    ]
                 )
 
-                plot_individual_enrichment(
+                if len(df) != expected_count:
+                    raise ValueError(
+                        "요약 결과와 개별 CSV 불일치: "
+                        f"{dataset}, {group}, {library}"
+                    )
+
+    individual_count = 0
+    empty_count = 0
+    comparison_count = 0
+    summary_count = 0
+
+    # 48개 개별 그래프
+    for dataset in DATASET_LABELS:
+
+        for group in GENE_GROUPS:
+
+            for library in GENE_SET_LIBRARIES:
+
+                tested_terms = int(
+                    summary_lookup.loc[
+                        (dataset, group, library),
+                        "tested_terms",
+                    ]
+                )
+
+                is_empty = plot_individual_enrichment(
                     dataset,
                     group,
                     library,
-                    df,
+                    tested_terms=tested_terms,
                 )
 
                 individual_count += 1
 
-                if df.empty:
+                if is_empty:
                     empty_count += 1
 
-                # 통합 비교 그래프에는 전체 DEG 결과 사용
-                if group == "all":
-                    all_deg_results[library][
-                        dataset
-                    ] = df
-
-    # 라이브러리별 통합 비교 그래프
-    comparison_count = 0
-
+    # 4개 라이브러리 통합 비교 그래프
     for library in GENE_SET_LIBRARIES:
-        plot_library_comparison(
-            library,
-            all_deg_results[library],
-        )
+
+        plot_library_comparison(library)
 
         comparison_count += 1
 
-    # 전체 풍부도 분석 요약 그래프
-    plot_enrichment_summary()
+    # 공통 Y축 요약 그래프
+    plot_enrichment_summary(
+        independent_y=False,
+        summary=summary,
+    )
+
+    summary_count += 1
+
+    # 독립 Y축 요약 그래프
+    plot_enrichment_summary(
+        independent_y=True,
+        summary=summary,
+    )
+
+    summary_count += 1
 
     total_figures = (
         individual_count
         + comparison_count
-        + 1
+        + summary_count
     )
 
     print("\n" + "=" * 60)
 
     print(
-        "[COMPLETE] "
-        "Enrichment visualization finished."
+        "[COMPLETE] Enrichment visualization finished."
     )
 
-    print(
-        f"Individual plots: "
-        f"{individual_count}"
-    )
-
-    print(
-        f"Empty-result plots: "
-        f"{empty_count}"
-    )
-
-    print(
-        f"Comparison plots: "
-        f"{comparison_count}"
-    )
-
-    print("Summary plots: 1")
-
-    print(
-        f"Total figures: {total_figures}"
-    )
-
-    print(
-        f"Total files saved: "
-        f"{total_figures * 2}"
-    )
-
-    print(
-        f"Output directory: "
-        f"{ENRICHMENT_PLOT_DIR}"
-    )
+    print(f"Individual plots: {individual_count}")
+    print(f"Empty-result plots: {empty_count}")
+    print(f"Comparison plots: {comparison_count}")
+    print(f"Summary plots: {summary_count}")
+    print(f"Total figures: {total_figures}")
+    print(f"Total files saved: {total_figures * 2}")
 
     print("=" * 60)
 
