@@ -648,7 +648,7 @@ def plot_library_comparison(library):
     fig, axes = plt.subplots(
         2,
         2,
-        figsize=(19, 12.5),
+        figsize=(19, 15),
     )
 
     fig.subplots_adjust(
@@ -686,7 +686,7 @@ def plot_library_comparison(library):
             plot_df,
             color_norm,
             x_limit=x_limit,
-            wrap_width=36,
+            wrap_width=43,
             label_size=10,
         )
 
