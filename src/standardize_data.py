@@ -317,9 +317,9 @@ if duplicated.any():
         if column not in ordered_columns
     ]
 
-        result = result[ordered_columns + remaining_columns].reset_index(
-        drop=True
-    )
+    result = result[
+        ordered_columns + remaining_columns
+    ].reset_index(drop=True)
 
     result.attrs["unannotated_count"] = unannotated_count
 
