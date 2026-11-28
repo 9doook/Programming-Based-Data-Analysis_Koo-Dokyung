@@ -179,17 +179,68 @@ def standardize_deg_data(data):
         )
 
     # 필수 유전자 기호 확인
-    result["gene_symbol"] = (
-        result["gene_symbol"]
-        .astype("string")
-        .str.strip()
+    
+# 유전자 기호 및 식별자 표준화
+result["gene_symbol"] = (
+    result["gene_symbol"]
+    .astype("string")
+    .str.strip()
+)
+
+# GEO 데이터에서 발견되는 비정상적인 주석 표현 처리
+invalid_annotations = {
+    "",
+    "character(0)",
+    "integer(0)",
+    "nan",
+    "none",
+    "null",
+    "na",
+}
+
+for column in ["gene_symbol", "ensembl_id"]:
+    if column in result.columns:
+        values = (
+            result[column]
+            .astype("string")
+            .str.strip()
+        )
+
+        invalid_mask = (
+            values.str.lower()
+            .isin(invalid_annotations)
+        )
+
+        result[column] = values.mask(invalid_mask)
+
+# 유전자 기호와 Ensembl ID가 모두 없는 행 분리
+unannotated_mask = result[
+    "gene_symbol"
+].isna()
+
+if "ensembl_id" in result.columns:
+    unannotated_mask &= result["ensembl_id"].isna()
+
+unannotated_count = int(unannotated_mask.sum())
+
+# 식별 가능한 유전자만 표준 분석 데이터로 사용
+result = result.loc[~unannotated_mask].copy()
+
+# 남은 유전자 기호는 필수
+if result["gene_symbol"].isna().any():
+    raise ValueError(
+        "유전자 기호가 없고 대체 식별자도 없는 행이 남아 있습니다."
     )
 
-    if result["gene_symbol"].isna().any():
-        raise ValueError("유전자 기호에 결측값이 있습니다.")
+# 실제 유전자 기호 중복 검사
+duplicated = result["gene_symbol"].duplicated()
 
-    if result["gene_symbol"].eq("").any():
-        raise ValueError("유전자 기호가 비어 있습니다.")
+if duplicated.any():
+    raise ValueError(
+        "중복된 유전자 기호가 발견되었습니다: "
+        f"{result.loc[duplicated, 'gene_symbol'].tolist()[:10]}"
+    )
+
 
     # 통계값 숫자 형식 변환
     numeric_columns = [
@@ -266,9 +317,13 @@ def standardize_deg_data(data):
         if column not in ordered_columns
     ]
 
-    return result[ordered_columns + remaining_columns].reset_index(
+        result = result[ordered_columns + remaining_columns].reset_index(
         drop=True
     )
+
+    result.attrs["unannotated_count"] = unannotated_count
+
+    return result
 
 
 def standardize_deg_file(input_path, output_path=None):
