@@ -145,10 +145,13 @@ def test_invalid_numeric_values(sample_data, column, value):
 
 
 def test_missing_gene_symbol(sample_data):
-    sample_data.loc[0, "short_id"] = None
+    sample_data.loc[0, "short_id"] = "character(0)"
+    sample_data.loc[0, "ensembl_id"] = "character(0)"
 
-    with pytest.raises(ValueError, match="결측값"):
-        standardize_deg_data(sample_data)
+    result = standardize_deg_data(sample_data)
+
+    assert len(result) == 2
+    assert result.attrs["unannotated_count"] == 1
 
 
 def test_empty_gene_symbol(sample_data):
@@ -293,3 +296,12 @@ def test_additional_columns_are_preserved(sample_data):
         "B",
         "C",
     ]
+
+def test_preserve_rows_with_ensembl_id(sample_data):
+    sample_data.loc[0, "short_id"] = "character(0)"
+    sample_data.loc[0, "ensembl_id"] = "ENSG00000129965"
+
+    result = standardize_deg_data(sample_data)
+
+    assert len(result) == 3
+    assert result.loc[0, "ensembl_id"] == "ENSG00000129965"
