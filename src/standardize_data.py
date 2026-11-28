@@ -1,374 +1,212 @@
 """
-범용 DEG 데이터 표준화 모듈
-
-다양한 GEO 데이터셋의 DEG 결과를 공통 열 구조로 변환한다.
-원본 통계값은 변경하지 않는다.
+Universal DEG data standardization module.
 """
+from __future__ import annotations
 
+import argparse
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
 
-
 COLUMN_ALIASES = {
-    "gene_symbol": [
-        "gene_symbol",
-        "short_id",
-        "gene_name",
-        "symbol",
-        "gene",
-    ],
-    "ensembl_id": [
-        "ensembl_id",
-        "ensembl",
-        "gene_ensembl_id",
-    ],
-    "log2fc": [
-        "log2fc",
-        "log2foldchange",
-        "log2_fold_change",
-        "log_fc",
-    ],
-    "pvalue": [
-        "pvalue",
-        "p_value",
-        "pval",
-    ],
-    "padj": [
-        "padj",
-        "adjusted_pvalue",
-        "adjusted_p_value",
-        "fdr",
-        "qvalue",
-    ],
-    "base_mean": [
-        "base_mean",
-        "basemean",
-        "mean_expression",
-    ],
-    "description": [
-        "description",
-        "gene_description",
-    ],
-    "biotype": [
-        "biotype",
-        "gene_biotype",
-    ],
+    "gene_symbol": ["gene_symbol", "short_id", "gene_name", "symbol", "gene"],
+    "ensembl_id": ["ensembl_id", "ensembl", "gene_ensembl_id"],
+    "log2fc": ["log2fc", "log2foldchange", "log2_fold_change", "log_fc"],
+    "pvalue": ["pvalue", "p_value", "pval"],
+    "padj": ["padj", "adjusted_pvalue", "adjusted_p_value", "fdr", "qvalue"],
+    "base_mean": ["base_mean", "basemean", "mean_expression"],
+    "description": ["description", "gene_description"],
+    "biotype": ["biotype", "gene_biotype"],
 }
+REQUIRED_STAT_COLUMNS = {"log2fc", "pvalue", "padj"}
+INVALID_ANNOTATIONS = {"", "character(0)", "integer(0)", "nan", "none", "null", "na"}
 
 
-REQUIRED_COLUMNS = {
-    "gene_symbol",
-    "log2fc",
-    "pvalue",
-    "padj",
-}
+def normalize_column_name(name: object) -> str:
+    """Normalize a column name for alias matching."""
+    return str(name).strip().lower().replace(" ", "_").replace("-", "_")
 
 
-def normalize_column_name(name):
-    """열 이름의 대소문자와 구분자를 통일한다."""
-
-    return (
-        str(name)
-        .strip()
-        .lower()
-        .replace(" ", "_")
-        .replace("-", "_")
-    )
-
-
-def build_column_mapping(columns):
-    """실제 열 이름을 표준 열 이름으로 매핑한다."""
-
+def build_column_mapping(columns: Iterable[object]) -> dict:
+    """Map source column names to standard names."""
     normalized_columns = {}
-
     for column in columns:
         normalized = normalize_column_name(column)
-
         if normalized in normalized_columns:
-            raise ValueError(
-                f"중복된 열 이름이 발견되었습니다: {normalized}"
-            )
-
+            raise ValueError(f"중복된 열 이름이 발견되었습니다: {normalized}")
         normalized_columns[normalized] = column
 
     mapping = {}
-
     for standard_name, aliases in COLUMN_ALIASES.items():
-
         matches = [
-            normalized
-            for normalized in aliases
-            if normalized in normalized_columns
+            normalize_column_name(alias)
+            for alias in aliases
+            if normalize_column_name(alias) in normalized_columns
         ]
-
         if len(matches) > 1:
             raise ValueError(
-                f"{standard_name}에 대응하는 열이 여러 개입니다: "
-                f"{matches}"
+                f"{standard_name}에 대응하는 열이 여러 개입니다: {matches}"
             )
-
         if matches:
-            original_name = normalized_columns[matches[0]]
-            mapping[original_name] = standard_name
-
+            mapping[normalized_columns[matches[0]]] = standard_name
     return mapping
 
 
-def read_deg_file(file_path):
-    """TSV 또는 압축 TSV 파일을 읽는다."""
-
+def read_deg_file(file_path: str | Path) -> pd.DataFrame:
+    """Read a TSV or compressed TSV file."""
     file_path = Path(file_path)
-
     if not file_path.is_file():
-        raise FileNotFoundError(
-            f"데이터 파일을 찾을 수 없습니다: {file_path}"
-        )
-
+        raise FileNotFoundError(f"데이터 파일을 찾을 수 없습니다: {file_path}")
     try:
-        data = pd.read_csv(
-            file_path,
-            sep="\t",
-            compression="infer",
-        )
-
+        data = pd.read_csv(file_path, sep="\t", compression="infer")
     except Exception as error:
-        raise ValueError(
-            f"데이터 파일을 읽을 수 없습니다: {error}"
-        ) from error
-
+        raise ValueError(f"데이터 파일을 읽을 수 없습니다: {error}") from error
     if data.empty:
         raise ValueError("입력 데이터가 비어 있습니다.")
-
     return data
 
 
-def standardize_deg_data(data):
+def _clean_annotation_column(series: pd.Series) -> pd.Series:
+    """Convert known empty annotation placeholders to pandas NA."""
+    values = series.astype("string").str.strip()
+    return values.mask(values.str.lower().isin(INVALID_ANNOTATIONS), pd.NA)
+
+
+def standardize_deg_data(data: pd.DataFrame) -> pd.DataFrame:
     """
-    DEG 데이터의 열 이름과 데이터 형식을 표준화한다.
+    Standardize DEG columns and validate values.
 
-    Parameters
-    ----------
-    data : pandas.DataFrame
-        원본 DEG 데이터
-
-    Returns
-    -------
-    pandas.DataFrame
-        표준화된 DEG 데이터
+    Rows without both gene_symbol and ensembl_id are excluded and counted.
+    Rows with an Ensembl ID but no gene symbol are retained.
     """
-
     if not isinstance(data, pd.DataFrame):
         raise TypeError("입력은 pandas DataFrame이어야 합니다.")
-
     if data.empty:
         raise ValueError("입력 데이터가 비어 있습니다.")
 
-    result = data.copy()
+    result = data.copy(deep=True)
+    result = result.rename(columns=build_column_mapping(result.columns))
 
-    mapping = build_column_mapping(result.columns)
+    missing_stats = REQUIRED_STAT_COLUMNS - set(result.columns)
+    if missing_stats:
+        raise ValueError(f"필수 열이 누락되었습니다: {sorted(missing_stats)}")
 
-    result = result.rename(columns=mapping)
+    if not ({"gene_symbol", "ensembl_id"} & set(result.columns)):
+        raise ValueError("유전자 식별 열이 필요합니다: gene_symbol 또는 ensembl_id")
 
-    missing = REQUIRED_COLUMNS - set(result.columns)
-
-    if missing:
-        raise ValueError(
-            f"필수 열이 누락되었습니다: {sorted(missing)}"
+    # Keep both identifier columns in the standardized output schema.
+    if "gene_symbol" not in result.columns:
+        result["gene_symbol"] = pd.Series(
+            pd.NA, index=result.index, dtype="string"
+        )
+    if "ensembl_id" not in result.columns:
+        result["ensembl_id"] = pd.Series(
+            pd.NA, index=result.index, dtype="string"
         )
 
-    # 필수 유전자 기호 확인
-    
-# 유전자 기호 및 식별자 표준화
-result["gene_symbol"] = (
-    result["gene_symbol"]
-    .astype("string")
-    .str.strip()
-)
+    for column in ("gene_symbol", "ensembl_id"):
+        if column in result.columns:
+            result[column] = _clean_annotation_column(result[column])
 
-# GEO 데이터에서 발견되는 비정상적인 주석 표현 처리
-invalid_annotations = {
-    "",
-    "character(0)",
-    "integer(0)",
-    "nan",
-    "none",
-    "null",
-    "na",
-}
+    if "gene_symbol" in result.columns:
+        missing_symbol = result["gene_symbol"].isna()
+    else:
+        missing_symbol = pd.Series(True, index=result.index)
 
-for column in ["gene_symbol", "ensembl_id"]:
-    if column in result.columns:
-        values = (
-            result[column]
-            .astype("string")
-            .str.strip()
-        )
+    if "ensembl_id" in result.columns:
+        missing_ensembl = result["ensembl_id"].isna()
+    else:
+        missing_ensembl = pd.Series(True, index=result.index)
 
-        invalid_mask = (
-            values.str.lower()
-            .isin(invalid_annotations)
-        )
+    unannotated_mask = missing_symbol & missing_ensembl
+    unannotated_count = int(unannotated_mask.sum())
+    result = result.loc[~unannotated_mask].copy()
 
-        result[column] = values.mask(invalid_mask)
+    if result.empty:
+        raise ValueError("유효한 유전자 식별자가 있는 행이 없습니다.")
 
-# 유전자 기호와 Ensembl ID가 모두 없는 행 분리
-unannotated_mask = result[
-    "gene_symbol"
-].isna()
+    # Check duplicate valid symbols only; retain Ensembl-only rows.
+    if "gene_symbol" in result.columns:
+        valid_symbols = result["gene_symbol"].dropna()
+        duplicates = valid_symbols[valid_symbols.duplicated()].unique().tolist()
+        if duplicates:
+            raise ValueError(
+                f"중복된 유전자 기호가 발견되었습니다: {duplicates[:10]}"
+            )
 
-if "ensembl_id" in result.columns:
-    unannotated_mask &= result["ensembl_id"].isna()
-
-unannotated_count = int(unannotated_mask.sum())
-
-# 식별 가능한 유전자만 표준 분석 데이터로 사용
-result = result.loc[~unannotated_mask].copy()
-
-# 남은 유전자 기호는 필수
-if result["gene_symbol"].isna().any():
-    raise ValueError(
-        "유전자 기호가 없고 대체 식별자도 없는 행이 남아 있습니다."
-    )
-
-# 실제 유전자 기호 중복 검사
-duplicated = result["gene_symbol"].duplicated()
-
-if duplicated.any():
-    raise ValueError(
-        "중복된 유전자 기호가 발견되었습니다: "
-        f"{result.loc[duplicated, 'gene_symbol'].tolist()[:10]}"
-    )
-
-
-    # 통계값 숫자 형식 변환
-    numeric_columns = [
-        "log2fc",
-        "pvalue",
-        "padj",
-    ]
-
+    numeric_columns = ["log2fc", "pvalue", "padj"]
     if "base_mean" in result.columns:
         numeric_columns.append("base_mean")
 
     for column in numeric_columns:
-
-        result[column] = pd.to_numeric(
-            result[column],
-            errors="coerce",
-        )
-
+        result[column] = pd.to_numeric(result[column], errors="coerce")
         if result[column].isna().any():
             raise ValueError(
                 f"{column}에 결측값 또는 잘못된 숫자가 있습니다."
             )
-
         if not np.isfinite(result[column]).all():
-            raise ValueError(
-                f"{column}에 무한대 또는 비유한 값이 있습니다."
-            )
+            raise ValueError(f"{column}에 무한대 또는 비유한 값이 있습니다.")
 
-    # 통계값 범위 검사
-    for column in ["pvalue", "padj"]:
-
+    for column in ("pvalue", "padj"):
         if not result[column].between(0, 1).all():
-            raise ValueError(
-                f"{column}은 0 이상 1 이하여야 합니다."
-            )
+            raise ValueError(f"{column}은 0 이상 1 이하여야 합니다.")
 
-    if "base_mean" in result.columns:
+    if "base_mean" in result.columns and (result["base_mean"] < 0).any():
+        raise ValueError("base_mean은 음수가 될 수 없습니다.")
 
-        if (result["base_mean"] < 0).any():
-            raise ValueError(
-                "base_mean은 음수가 될 수 없습니다."
-            )
-
-    # 중복 유전자 확인
-    duplicated = result["gene_symbol"].duplicated()
-
-    if duplicated.any():
-        raise ValueError(
-            f"중복된 유전자 기호가 발견되었습니다: "
-            f"{result.loc[duplicated, 'gene_symbol'].tolist()[:10]}"
-        )
-
-    # 표준 열 순서
     preferred_order = [
-        "gene_symbol",
-        "ensembl_id",
-        "log2fc",
-        "pvalue",
-        "padj",
-        "base_mean",
-        "description",
-        "biotype",
+        "gene_symbol", "ensembl_id", "log2fc", "pvalue", "padj",
+        "base_mean", "description", "biotype",
     ]
-
     ordered_columns = [
-        column
-        for column in preferred_order
-        if column in result.columns
+        column for column in preferred_order if column in result.columns
     ]
-
     remaining_columns = [
-        column
-        for column in result.columns
-        if column not in ordered_columns
+        column for column in result.columns if column not in ordered_columns
     ]
-
-    result = result[
-        ordered_columns + remaining_columns
-    ].reset_index(drop=True)
+    result = result[ordered_columns + remaining_columns].reset_index(drop=True)
 
     result.attrs["unannotated_count"] = unannotated_count
-
+    result.attrs["input_row_count"] = len(data)
+    result.attrs["output_row_count"] = len(result)
+    result.attrs["ensembl_only_count"] = (
+        int(result["gene_symbol"].isna().sum())
+        if "gene_symbol" in result.columns else len(result)
+    )
     return result
 
 
-def standardize_deg_file(input_path, output_path=None):
-    """파일을 읽고 표준화한 뒤 선택적으로 저장한다."""
-
+def standardize_deg_file(
+    input_path: str | Path,
+    output_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """Read, standardize, and optionally save a DEG file."""
     data = read_deg_file(input_path)
-
     standardized = standardize_deg_data(data)
-
     if output_path is not None:
-
         output_path = Path(output_path)
-
-        output_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        standardized.to_csv(
-            output_path,
-            index=False,
-        )
-
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        standardized.to_csv(output_path, index=False)
     return standardized
 
 
-if __name__ == "__main__":
-
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="DEG 데이터 표준화"
-    )
-
+def main() -> None:
+    parser = argparse.ArgumentParser(description="DEG 데이터 표준화")
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
-
     args = parser.parse_args()
 
-    result = standardize_deg_file(
-        args.input,
-        args.output,
-    )
-
+    result = standardize_deg_file(args.input, args.output)
     print("[SUCCESS] DEG standardization completed")
-    print(f"Genes: {len(result):,}")
+    print(f"Input rows: {result.attrs['input_row_count']:,}")
+    print(f"Standardized rows: {len(result):,}")
+    print(f"Unannotated rows excluded: {result.attrs['unannotated_count']:,}")
+    print(f"Ensembl-only rows retained: {result.attrs['ensembl_only_count']:,}")
     print(f"Columns: {len(result.columns)}")
     print(f"Output: {args.output}")
+
+
+if __name__ == "__main__":
+    main()
