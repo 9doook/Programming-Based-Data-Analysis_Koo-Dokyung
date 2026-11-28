@@ -222,7 +222,7 @@ def load_config(
     # --------------------------------------------------------
 
     analysis = _require_mapping(
-        raw.get("analysis"),
+        raw.get("analysis", {}),
         "analysis",
     )
 
