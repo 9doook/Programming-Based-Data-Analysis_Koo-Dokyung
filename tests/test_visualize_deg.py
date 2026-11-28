@@ -101,11 +101,19 @@ def test_volcano_classification(dataset_name):
             df["regulation"] == category
         ]
 
-        assert sorted(
-            actual["ensembl_id_original"].tolist()
-        ) == sorted(
-            expected["ensembl_id_original"].tolist()
-        )
+        # 결측값과 문자열 ID가 혼합되어도 안전하게 비교하도록
+        # 양쪽 ID를 동일한 문자열 형식으로 정규화한다.
+        actual_ids = [
+            "" if pd.isna(value) else str(value)
+            for value in actual["ensembl_id_original"]
+        ]
+
+        expected_ids = [
+            "" if pd.isna(value) else str(value)
+            for value in expected["ensembl_id_original"]
+        ]
+
+        assert sorted(actual_ids) == sorted(expected_ids)
 
 
 # ========================================
