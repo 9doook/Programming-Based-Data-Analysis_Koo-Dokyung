@@ -566,12 +566,21 @@ def test_deg_input_consistency(dataset):
 
         assert len(saved) == len(expected)
 
-        assert sorted(
-            saved["ensembl_id_original"].tolist()
-        ) == sorted(
-            expected["ensembl_id_original"].tolist()
-        )
+        # 결측값을 빈 문자열로 통일하고 모든 ID를 문자열로 변환해
+        # 문자열과 NaN/NA가 섞인 상태에서 정렬되는 문제를 방지합니다.
+        saved_ids = [
+            "" if pd.isna(value) else str(value)
+            for value in saved["ensembl_id_original"]
+        ]
 
+        expected_ids = [
+            "" if pd.isna(value) else str(value)
+            for value in expected["ensembl_id_original"]
+        ]
+
+        assert sorted(saved_ids) == sorted(expected_ids)
+
+        # 각 데이터셋의 모든 DEG 그룹에 대해 유전자 기호도 비교합니다.
         assert ea.get_gene_symbols(
             saved
         ) == ea.get_gene_symbols(
@@ -579,7 +588,6 @@ def test_deg_input_consistency(dataset):
         )
 
 
-# ============================================================
 # 15. 실제 결과 CSV 및 매핑 보고서 검증
 # ============================================================
 
