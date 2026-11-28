@@ -1,0 +1,26 @@
+
+{
+    "dataset": {
+        "accession": "GSE159984",
+        "title": "Type 2 Diabetes and Metabolic Stress",
+        "organism": "Homo sapiens"
+    },
+    "input": {
+        "type": "precomputed_deg",
+        "directory": "data/raw",
+        "base_url": "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE159nnn/GSE159984/suppl/",
+        "files": {
+            "t2d": "GSE159984_de-t2d.tsv.gz",
+            "combined_stress": "GSE159984_de-d4pg.tsv.gz",
+            "palmitate": "GSE159984_de-d4p.tsv.gz",
+            "glucose": "GSE159984_de-d4g.tsv.gz"
+        }
+    },
+    "analysis": {
+        "padj_threshold": 0.05,
+        "log2fc_threshold": 0.58
+    },
+    "output": {
+        "directory": "results/GSE159984"
+    }
+}
